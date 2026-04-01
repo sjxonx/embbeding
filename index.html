@@ -1325,12 +1325,13 @@ function drawVector() {
       ctx.lineWidth = 10;
       ctx.stroke();
     }
-    // Label
+    // Label — Fix 8: clamp y so label never clips at top edge
+    const labelY = Math.max(14, cy - 10);
     ctx.globalAlpha = isSelected ? 1 : (selectedWord !== null && !inCluster ? 0.2 : 0.7);
     ctx.fillStyle = isSelected ? w.color : '#e8e6f0';
     ctx.font = `${isSelected ? '500 ' : ''}${isSelected ? 13 : 11}px DM Mono, monospace`;
     ctx.textAlign = 'center';
-    ctx.fillText(w.label, cx, cy - 10);
+    ctx.fillText(w.label, cx, labelY);
     ctx.restore();
   });
 }
@@ -1359,8 +1360,15 @@ const wordBtns = document.getElementById('wordBtns');
     if (i === 4) { selectedWord = null; }
     else {
       const colors = ['#7c6aef','#ef6d58','#4ecb71','#f0b040'];
-      const idx = WORDS.findIndex(w => w.color === colors[i]);
-      selectedWord = idx;
+      const clusterColor = colors[i];
+      const clusterNodes = WORDS.map((w, idx) => ({ ...w, idx })).filter(w => w.color === clusterColor);
+      // pick the most central node (closest to cluster centroid)
+      const cx = clusterNodes.reduce((s, w) => s + w.x, 0) / clusterNodes.length;
+      const cy2 = clusterNodes.reduce((s, w) => s + w.y, 0) / clusterNodes.length;
+      const central = clusterNodes.reduce((best, w) =>
+        Math.hypot(w.x - cx, w.y - cy2) < Math.hypot(best.x - cx, best.y - cy2) ? w : best
+      );
+      selectedWord = central.idx;
       btn.classList.add('active');
     }
     drawVector();
@@ -1395,10 +1403,15 @@ function drawCosine() {
   const angleA = parseFloat(document.getElementById('angleA').value);
   const angleB = parseFloat(document.getElementById('angleB').value);
   const W = cosCanvas.clientWidth || 700;
-  cosCanvas.width = W * window.devicePixelRatio;
-  cosCanvas.height = 260 * window.devicePixelRatio;
-  cosCanvas.style.height = '260px';
-  cosCtx.scale(window.devicePixelRatio, window.devicePixelRatio);
+  // Fix 3: only reset transform when canvas size actually changes
+  const newW = Math.round(W * window.devicePixelRatio);
+  const newH = Math.round(260 * window.devicePixelRatio);
+  if (cosCanvas.width !== newW || cosCanvas.height !== newH) {
+    cosCanvas.width = newW;
+    cosCanvas.height = newH;
+    cosCanvas.style.height = '260px';
+    cosCtx.setTransform(window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0);
+  }
   const H = 260;
 
   cosCtx.clearRect(0, 0, W, H);
@@ -1424,14 +1437,18 @@ function drawCosine() {
   const ax = cx + r * Math.cos(axA), ay = cy + r * Math.sin(axA);
   const bx = cx + r * Math.cos(axB), by = cy + r * Math.sin(axB);
 
-  // Arc between vectors
-  const diff = toRad(angleB - angleA);
+  // Fix 2: arc between vectors — always draw the shorter arc
   cosCtx.save();
   cosCtx.strokeStyle = 'rgba(124,106,239,0.3)';
   cosCtx.lineWidth = 1.5;
   cosCtx.setLineDash([3, 3]);
+  let startAng = axA, endAng = axB;
+  // ensure we sweep the shorter arc
+  let diff = endAng - startAng;
+  while (diff > Math.PI)  diff -= 2 * Math.PI;
+  while (diff < -Math.PI) diff += 2 * Math.PI;
   cosCtx.beginPath();
-  cosCtx.arc(cx, cy, r * 0.28, -toRad(Math.max(angleA, angleB)), -toRad(Math.min(angleA, angleB)));
+  cosCtx.arc(cx, cy, r * 0.28, startAng, startAng + diff, diff < 0);
   cosCtx.stroke();
   cosCtx.restore();
 
@@ -1569,6 +1586,18 @@ const MODELS_COMPARE = [
 ];
 
 const pipelines = {};
+const pipelineLoading = {}; // Fix 4: promise cache to prevent double-download
+
+async function loadModel(id) {
+  if (pipelines[id]) return pipelines[id];
+  if (pipelineLoading[id]) return pipelineLoading[id];
+  pipelineLoading[id] = pipeline('feature-extraction', id).then(p => {
+    pipelines[id] = p;
+    return p;
+  });
+  return pipelineLoading[id];
+}
+
 const runBtn = document.getElementById('runBtn');
 const statusBar = document.getElementById('statusBar');
 const resultsList = document.getElementById('resultsList');
@@ -1596,7 +1625,7 @@ MODELS_COMPARE.forEach(m => {
 async function init() {
   for (const m of MODELS_COMPARE) {
     statusBar.innerHTML = `${m.name} 로딩 중 <span class="loading-dot">.</span><span class="loading-dot">.</span><span class="loading-dot">.</span>`;
-    pipelines[m.id] = await pipeline('feature-extraction', m.id);
+    await loadModel(m.id);
   }
   statusBar.textContent = '모든 모델 준비 완료 ✓';
   runBtn.disabled = false;
@@ -1637,7 +1666,7 @@ async function runAll() {
     const color = sim > 0.7 ? 'var(--green)' : sim > 0.4 ? 'var(--accent)' : 'var(--coral)';
     scoreEl.style.color = color;
     barEl.style.background = color;
-    setTimeout(() => { barEl.style.width = pct + '%'; }, 50);
+    barEl.style.width = pct + '%';  // Fix 9: direct assignment, no setTimeout race
   }
 
   // Highlight winner
@@ -1664,10 +1693,10 @@ const HERO_MODELS = [
 ];
 
 const EXPLAIN_LEVELS = [
-  { min: 0.85, max: 1.01,  icon: '🔴', color: 'var(--green)',  borderColor: 'rgba(78,203,113,0.35)',  bg: 'rgba(78,203,113,0.07)',
+  { min: 0.85, max: 1.01,  icon: '🟢', color: 'var(--green)',  borderColor: 'rgba(78,203,113,0.35)',  bg: 'rgba(78,203,113,0.07)',
     title: '거의 동일한 의미 (85–100%)',
     desc: (a, b, pct) => `두 문장은 의미적으로 사실상 같아. 임베딩 공간에서 매우 가깝게 위치해서 코사인 유사도가 ${pct}%야. 바꿔 써도 맥락이 거의 바뀌지 않아.` },
-  { min: 0.70, max: 0.85,  icon: '🟢', color: 'var(--green)',  borderColor: 'rgba(78,203,113,0.25)',  bg: 'rgba(78,203,113,0.05)',
+  { min: 0.70, max: 0.85,  icon: '🔵', color: 'var(--green)',  borderColor: 'rgba(78,203,113,0.25)',  bg: 'rgba(78,203,113,0.05)',
     title: '높은 유사도 (70–85%)',
     desc: (a, b, pct) => `두 문장은 핵심 주제가 같아. ${pct}%의 유사도는 검색 시스템에서 거의 같은 문서로 처리될 수준이야. 표현 방식만 다르고 의미는 유사해.` },
   { min: 0.50, max: 0.70,  icon: '🟡', color: 'var(--amber)',  borderColor: 'rgba(240,176,64,0.25)',  bg: 'rgba(240,176,64,0.05)',
@@ -1676,7 +1705,7 @@ const EXPLAIN_LEVELS = [
   { min: 0.25, max: 0.50,  icon: '🟠', color: 'var(--amber)',  borderColor: 'rgba(240,176,64,0.2)',   bg: 'rgba(240,176,64,0.04)',
     title: '낮은 유사도 (25–50%)',
     desc: (a, b, pct) => `두 문장 사이에 약한 의미적 연결이 있어. ${pct}%의 유사도는 같은 도메인일 수도 있지만, 구체적인 내용은 꽤 달라.` },
-  { min: -0.1, max: 0.25,  icon: '⚫', color: 'var(--coral)',  borderColor: 'rgba(239,109,88,0.25)',  bg: 'rgba(239,109,88,0.05)',
+  { min: -0.1, max: 0.25,  icon: '🔴', color: 'var(--coral)',  borderColor: 'rgba(239,109,88,0.25)',  bg: 'rgba(239,109,88,0.05)',
     title: '거의 무관한 내용 (0–25%)',
     desc: (a, b, pct) => `두 문장은 의미적으로 거의 연결되어 있지 않아. ${pct}%의 유사도는 임베딩 공간에서 멀리 떨어져 있다는 뜻이야. 다른 주제나 도메인으로 보여.` },
 ];
@@ -1708,12 +1737,10 @@ HERO_MODELS.forEach(m => {
   heroMiniBarsEl.appendChild(row);
 });
 
-// Load models in background (reuse main pipelines object)
+// Load models in background (reuse shared pipelines + promise cache)
 async function heroInit() {
   for (const m of HERO_MODELS) {
-    if (!pipelines[m.id]) {
-      pipelines[m.id] = await pipeline('feature-extraction', m.id);
-    }
+    await loadModel(m.id);
   }
   heroLoaded = true;
   const btn = document.getElementById('heroRunBtn');
@@ -1875,7 +1902,7 @@ function renderHistory() {
         </div>
         <div class="hh-meta">
           <span class="hh-model-chip">${rec.short}</span>
-          <span class="hh-time">${formatTime(rec.time)}</span>
+          <span class="hh-time" data-id="${rec.id}">${formatTime(rec.time)}</span>
           <button class="hh-reuse-btn" data-id="${rec.id}">↩ 다시 쓰기</button>
         </div>
       </div>
@@ -1907,7 +1934,9 @@ function renderHistory() {
         b.classList.toggle('active', b.dataset.mid === rec.modelId);
       });
       heroSelectedModel = rec.modelId;
-      document.getElementById('heroWidget').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // Fix 6: scroll to the input element directly (heroWidget is inside overflow:hidden hero)
+      document.getElementById('heroA').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      document.getElementById('heroA').focus();
     });
 
     // Click whole card → expand model breakdown tooltip
@@ -1936,14 +1965,15 @@ function toggleBreakdown(el, rec) {
   el.appendChild(bd);
 }
 
-// Sort toggle
+// Sort toggle — Fix 5: label shows the next action, not current state
 heroSortBtn.addEventListener('click', () => {
   historySortDesc = !historySortDesc;
-  heroSortBtn.textContent = historySortDesc ? '최신순' : '점수순';
   if (!historySortDesc) {
-    historyRecords.sort((a,b) => b.score - a.score);
+    historyRecords.sort((a, b) => b.score - a.score);
+    heroSortBtn.textContent = '최신순으로 ↕';
   } else {
-    historyRecords.sort((a,b) => b.id - a.id);
+    historyRecords.sort((a, b) => b.id - a.id);
+    heroSortBtn.textContent = '점수순으로 ↕';
   }
   renderHistory();
 });
@@ -1962,13 +1992,18 @@ heroClearBtn.addEventListener('click', () => {
   }, 350);
 });
 
-// Periodically refresh "X분 전" timestamps
+// Fix 10: update only timestamp text nodes in place to avoid wiping open breakdowns
 setInterval(() => {
-  if (historyRecords.length > 0) renderHistory();
+  if (historyRecords.length === 0) return;
+  document.querySelectorAll('.hh-time[data-id]').forEach(el => {
+    const id = parseInt(el.dataset.id, 10);
+    const rec = historyRecords.find(r => r.id === id);
+    if (rec) el.textContent = formatTime(rec.time);
+  });
 }, 30000);
 
 async function heroComputeSim(modelId, tA, tB) {
-  const p = pipelines[modelId];
+  const p = await loadModel(modelId);
   const [oA, oB] = await Promise.all([
     p(tA, { pooling: 'mean', normalize: true }),
     p(tB, { pooling: 'mean', normalize: true }),
